@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>subnetcalc: CIDR subnet calculator</title>
+<style>
+:root{--bg:#f0f7fa;--card:#fff;--fg:#0c1a3a;--mut:#5b7287;--line:#d3e3ec;--acc:#0891b2;--net:#0891b2;--host:#e11d48;--pane:#f6fbfd}
+@media (prefers-color-scheme:dark){:root{--bg:#07131f;--card:#0d1f31;--fg:#e4f2fb;--mut:#86a6bd;--line:#1c3a52;--acc:#22d3ee;--net:#22d3ee;--host:#fb7185;--pane:#0a1827}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.5 ui-sans-serif,system-ui,"Segoe UI",Helvetica,Arial,sans-serif}
+main{max-width:860px;margin:0 auto;padding:28px 16px 60px}
+h1{margin:0;font-size:30px;letter-spacing:-.5px}.sub{color:var(--mut);margin:4px 0 16px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:16px;margin-bottom:14px}
+input[type=text],input[type=number]{width:100%;background:transparent;color:var(--fg);border:1px solid var(--line);border-radius:10px;padding:10px 12px;font:18px ui-monospace,Menlo,Consolas,monospace}
+input:focus{outline:2px solid var(--acc);outline-offset:1px}
+.err{color:var(--host);min-height:22px;font-size:14px;margin-top:6px}
+table{width:100%;border-collapse:collapse}
+td{padding:7px 4px;border-bottom:1px solid var(--line);vertical-align:top}
+td:first-child{color:var(--mut);width:38%;font-size:14px}
+td:last-child{font-family:ui-monospace,Menlo,Consolas,monospace;word-break:break-all}
+.bin{background:var(--pane);border:1px solid var(--line);border-radius:10px;padding:10px 12px;font:14px/1.9 ui-monospace,Menlo,Consolas,monospace;overflow-x:auto;white-space:nowrap}
+.n{color:var(--net);font-weight:700}.h{color:var(--host)}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+button{background:var(--acc);color:#04202a;border:0;border-radius:10px;padding:9px 14px;font:700 14px inherit;cursor:pointer}
+button.g{background:transparent;color:var(--fg);border:1px solid var(--line)}
+ul{list-style:none;margin:10px 0 0;padding:0;display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:6px}
+li button{width:100%;text-align:left;font:13px ui-monospace,Menlo,Consolas,monospace}
+h2{margin:0 0 8px;font-size:13px;text-transform:uppercase;letter-spacing:.08em;color:var(--mut)}
+</style>
+</head>
+<body>
+<main>
+  <h1>🧮 subnetcalc</h1>
+  <p class="sub">Type an address with a prefix (<code>192.168.1.10/24</code>, <code>10.0.0.0/255.255.255.0</code>, <code>2001:db8::/32</code>).</p>
+  <div class="card">
+    <input id="in" type="text" value="192.168.1.10/24" spellcheck="false" autocomplete="off" aria-label="CIDR">
+    <div class="err" id="err"></div>
+    <table id="tbl"></table>
+  </div>
+  <div class="card" id="binCard"><h2>Binary view <span style="text-transform:none;letter-spacing:0">(<span class="n">network bits</span> · <span class="h">host bits</span>)</span></h2><div class="bin" id="bin"></div></div>
+  <div class="card">
+    <h2>Split into smaller subnets</h2>
+    <div class="row"><div style="width:140px"><input id="np" type="number" min="1" max="128" aria-label="new prefix"></div><button id="split">Split</button><span class="sub" id="splitInfo" style="margin:0"></span></div>
+    <ul id="list"></ul>
+  </div>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+function parseV4(s){
+  const p = s.split("."); if (p.length !== 4) return null;
+  let n = 0n;
+  for (const x of p) { if (!/^\d{1,3}$/.test(x) || +x > 255) return null; n = (n << 8n) | BigInt(+x); }
+  return n;
+}
+function parseV6(s){
+  s = s.split("%")[0];
+  const dbl = s.includes("::"); if (dbl && s.indexOf("::") !== s.lastIndexOf("::")) return null;
+  let head, tail = [];
+  if (dbl) { const [h, t] = s.split("::"); head = h ? h.split(":") : []; tail = t ? t.split(":") : []; } else head = s.split(":");
+  const arr = tail.length ? tail : head;
+  if (arr.length && arr[arr.length - 1].includes(".")) {
+    const v = parseV4(arr.pop()); if (v === null) return null;
+    arr.push((v >> 16n).toString(16), (v & 0xffffn).toString(16));
+  }
+  let all;
+  if (dbl) { const miss = 8 - head.length - tail.length; if (miss < 1) return null; all = [...head, ...Array(miss).fill("0"), ...tail]; }
+  else { if (head.length !== 8) return null; all = head; }
+  let n = 0n;
+  for (const g of all) { if (!/^[0-9a-f]{1,4}$/i.test(g)) return null; n = (n << 16n) | BigInt(parseInt(g, 16)); }
+  return n;
+}
+const fmtV4 = n => [24n, 16n, 8n, 0n].map(s => Number((n >> s) & 255n)).join(".");
+function fmtV6(n){
+  const g = []; for (let i = 7; i >= 0; i--) g.push(Number((n >> BigInt(i * 16)) & 0xffffn));
+  let bs = -1, bl = 0;
+  for (let i = 0; i < 8;) { if (g[i] === 0) { let j = i; while (j < 8 && g[j] === 0) j++; if (j - i > bl) { bs = i; bl = j - i; } i = j; } else i++; }
+  const h = g.map(x => x.toString(16));
+  if (bl < 2) return h.join(":");
+  return h.slice(0, bs).join(":") + "::" + h.slice(bs + bl).join(":");
+}
+function parse(text){
+  text = text.trim(); if (!text) throw new Error("Enter an address like 192.168.1.10/24");
+  let [addr, pre] = text.split("/");
+  const v6 = addr.includes(":"), bits = v6 ? 128 : 32;
+  const ip = v6 ? parseV6(addr) : parseV4(addr);
+  if (ip === null) throw new Error("That is not a valid " + (v6 ? "IPv6" : "IPv4") + " address.");
+  let p;
+  if (pre === undefined) p = bits;
+  else if (!v6 && pre.includes(".")) {
+    const m = parseV4(pre); if (m === null) throw new Error("Invalid netmask.");
+    const inv = (~m) & 0xffffffffn; if ((inv & (inv + 1n)) !== 0n) throw new Error("Netmask must be contiguous (like 255.255.255.0).");
+    p = 32 - inv.toString(2).replace(/^0+$/, "").length;
+  } else { if (!/^\d+$/.test(pre) || +pre > bits) throw new Error("Prefix must be 0 to " + bits + "."); p = +pre; }
+  return {ip, p, bits, v6};
+}
+const full = bits => (1n << BigInt(bits)) - 1n;
+const maskOf = (p, bits) => full(bits) ^ ((1n << BigInt(bits - p)) - 1n);
+const fmt = (n, v6) => v6 ? fmtV6(n) : fmtV4(n);
+const V4T = [["0.0.0.0",8,"This network"],["10.0.0.0",8,"Private (RFC 1918)"],["100.64.0.0",10,"Shared address space (CGNAT)"],["127.0.0.0",8,"Loopback"],["169.254.0.0",16,"Link-local"],["172.16.0.0",12,"Private (RFC 1918)"],["192.0.2.0",24,"Documentation (TEST-NET-1)"],["192.168.0.0",16,"Private (RFC 1918)"],["224.0.0.0",4,"Multicast"],["240.0.0.0",4,"Reserved"]];
+const V6T = [["::1",128,"Loopback"],["fe80::",10,"Link-local"],["fc00::",7,"Unique local (private)"],["ff00::",8,"Multicast"],["2001:db8::",32,"Documentation"]];
+function kind(ip, v6){
+  const bits = v6 ? 128 : 32;
+  for (const [b, len, name] of (v6 ? V6T : V4T)) { const base = v6 ? parseV6(b) : parseV4(b); if ((ip >> BigInt(bits - len)) === (base >> BigInt(bits - len))) return name; }
+  return v6 ? "Global unicast / other" : "Public";
+}
+function row(k, v){ const tr = document.createElement("tr"); const a = document.createElement("td"), b = document.createElement("td"); a.textContent = k; b.textContent = v; tr.append(a, b); return tr; }
+let cur = null;
+function render(){
+  const err = $("err"), tbl = $("tbl"); tbl.textContent = ""; err.textContent = "";
+  try { cur = parse($("in").value); } catch (e) { err.textContent = e.message; cur = null; $("bin").textContent = ""; return; }
+  const {ip, p, bits, v6} = cur, mask = maskOf(p, bits), net = ip & mask, last = net | (full(bits) ^ mask), size = 1n << BigInt(bits - p);
+  const rows = [["Address", fmt(ip, v6)], ["Network", fmt(net, v6) + "/" + p]];
+  if (!v6) {
+    rows.push(["Netmask", fmtV4(mask)], ["Wildcard", fmtV4(full(32) ^ mask)]);
+    if (p <= 30) rows.push(["Broadcast", fmtV4(last)], ["Host range", fmtV4(net + 1n) + " - " + fmtV4(last - 1n)], ["Usable hosts", (size - 2n).toLocaleString("en-US")]);
+    else if (p === 31) rows.push(["Host range", fmtV4(net) + " - " + fmtV4(last)], ["Usable hosts", "2 (point-to-point, RFC 3021)"]);
+    else rows.push(["Usable hosts", "1 (single host)"]);
+  } else {
+    rows.push(["Expanded", Array.from({length: 8}, (_, i) => ((ip >> BigInt((7 - i) * 16)) & 0xffffn).toString(16).padStart(4, "0")).join(":")], ["First address", fmtV6(net)], ["Last address", fmtV6(last)]);
+  }
+  rows.push(["Total addresses", size.toLocaleString("en-US")], ["Type", kind(ip, v6)]);
+  for (const [k, v] of rows) tbl.appendChild(row(k, v));
+  const bin = $("bin"); bin.textContent = "";
+  if (v6) { bin.textContent = "Binary view is shown for IPv4 only."; }
+  else {
+    for (const [label, val] of [["address", ip], ["netmask", mask], ["network", net]]) {
+      const line = document.createElement("div"); const lb = document.createElement("span"); lb.textContent = label.padEnd(8, "\u00a0"); line.appendChild(lb);
+      const s = val.toString(2).padStart(32, "0");
+      for (let i = 0; i < 32; i++) { const sp = document.createElement("span"); sp.className = i < p ? "n" : "h"; sp.textContent = s[i] + (i % 8 === 7 && i < 31 ? "." : ""); line.appendChild(sp); }
+      bin.appendChild(line);
+    }
+  }
+  if (!$("np").value || +$("np").value <= p) $("np").value = Math.min(bits, p + 2);
+}
+function split(){
+  if (!cur) return;
+  const {ip, p, bits, v6} = cur, np = +$("np").value, list = $("list"), info = $("splitInfo"); list.textContent = "";
+  if (!(np > p && np <= bits)) { info.textContent = "Choose a prefix between /" + (p + 1) + " and /" + bits + "."; return; }
+  const count = 1n << BigInt(np - p), step = 1n << BigInt(bits - np), net = ip & maskOf(p, bits), cap = 256n;
+  info.textContent = count.toLocaleString("en-US") + " subnets of /" + np + (count > cap ? " (showing the first 256)" : "") + ". Click one to copy.";
+  for (let i = 0n; i < count && i < cap; i++) {
+    const text = fmt(net + i * step, v6) + "/" + np;
+    const li = document.createElement("li"), b = document.createElement("button"); b.className = "g"; b.textContent = text;
+    b.onclick = async () => { try { await navigator.clipboard.writeText(text); b.textContent = "copied ✓"; } catch (e) { b.textContent = "copy failed"; } setTimeout(() => b.textContent = text, 1000); };
+    li.appendChild(b); list.appendChild(li);
+  }
+}
+$("in").addEventListener("input", () => { $("np").value = ""; $("list").textContent = ""; $("splitInfo").textContent = ""; render(); });
+$("split").onclick = split;
+render();
+</script>
+</body>
+</html>
